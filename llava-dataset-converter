@@ -1,0 +1,128 @@
+import pandas as pd
+import json
+from pathlib import Path
+from datasets import load_dataset
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+def convert_first_row(dataset_name, output_path, config, local_path=None):
+    """
+    Process the first row of a dataset and save it to JSON.
+    
+    Args:
+        dataset_name (str): Hugging Face dataset name (e.g., 'liuhaotian/LLaVA-Instruct-150K').
+        output_path (str): Path to output JSON file.
+        config (dict): Configuration for dataset-specific settings.
+        local_path (str, optional): Path to local CSV/JSON file if online loading fails.
+    """
+    try:
+        # Initialize output structure
+        result = {
+            "dataset_id": config["dataset_id"],
+            "metadata": {
+                "source": "Hugging Face" if not local_path else "Local",
+                "original_id": "unknown"
+            },
+            "conversations": []
+        }
+        
+        if local_path:
+            # Load local file
+            logger.info(f"Loading local file: {local_path}")
+            if local_path.endswith(".csv"):
+                df = pd.read_csv(local_path, nrows=1)
+            elif local_path.endswith(".json"):
+                df = pd.read_json(local_path, lines=True, nrows=1)
+            else:
+                raise ValueError("Unsupported file format. Use CSV or JSON.")
+            row = df.iloc[0]
+        else:
+            # Load dataset from Hugging Face with streaming
+            logger.info(f"Loading dataset: {dataset_name}")
+            dataset = load_dataset(dataset_name, split="train", streaming=True)
+            
+            # Get the first row
+            iterator = iter(dataset)
+            row = next(iterator)
+            logger.info("Successfully retrieved first row")
+        
+        # Log row contents for debugging
+        logger.info(f"Row contents: {row}")
+        
+        # Update metadata with original ID if available
+        result["metadata"]["original_id"] = str(row.get("id", "unknown"))
+        
+        # Parse conversation
+        conv = row[config["conversation_column"]]
+        if isinstance(conv, str):
+            conv = json.loads(conv)
+        elif not isinstance(conv, (list, dict)):
+            raise ValueError(f"Invalid conversation format: {type(conv)}")
+        
+        image = row.get(config["image_column"], None)
+        
+        # Restructure turns
+        turns = []
+        for turn in conv:
+            # Map 'from' values to 'role' values
+            role = turn[config["role_key"]]
+            if role == "human":
+                role = "user"
+            elif role == "gpt":
+                role = "agent"
+            else:
+                logger.warning(f"Unknown role '{role}' in turn, using as-is")
+            
+            turn_data = {
+                "role": role,
+                "content": turn[config["content_key"]]
+            }
+            # Embed image in user turn (if applicable)
+            if image and role == "user" and config["embed_image"]:
+                # Placeholder URL (adjust based on actual image hosting)
+                image_url = f"https://huggingface.co/datasets/liuhaotian/LLaVA-Instruct-150K/resolve/main/{image}"
+                turn_data["image"] = image_url
+            turns.append(turn_data)
+        
+        result["conversations"].append(turns)
+        
+        # Save to JSON
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(output_path, "w") as f:
+            json.dump(result, f, indent=2)
+        
+        logger.info(f"Saved first row to {output_path}")
+    
+    except Exception as e:
+        logger.error(f"Error processing first row: {str(e)}", exc_info=True)
+        raise
+
+# Configuration
+config = {
+    "dataset_id": "llava_instruct_150k",
+    "conversation_column": "conversations",
+    "image_column": "image",
+    "role_key": "from",  # Updated to match dataset
+    "content_key": "value",
+    "embed_image": True
+}
+
+# Run conversion
+if __name__ == "__main__":
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        import os
+        os.system("pip install datasets")
+    
+    # Set paths
+    dataset_name = "liuhaotian/LLaVA-Instruct-150K"
+    output_path = "output_row1.json"
+    
+    # Try loading online, fall back to local if specified
+    local_path = None  # Set to path (e.g., "data.json") if using local file
+    convert_first_row(dataset_name, output_path, config, local_path)
